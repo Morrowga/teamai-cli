@@ -15,14 +15,18 @@ All notable changes to this project will be documented in this file. See [standa
 
 ### 🐛 Bug Fixes
 
+- `teamai pull` now deletes a tombstoned agent under all three render extensions, so the Codex `.toml` and Kiro `.json` copies of a removed agent no longer survive on other machines. The cleanup also runs when the team repo rev is unchanged, so an upgrade reaches machines that already pulled the tombstone with an older CLI. `teamai remove agents <name>` also honours `enabledAgents` and no longer deletes from excluded tools. Fixes [#576](https://github.com/Tencent/teamai-cli/issues/576).
+- `teamai remove rules <name>` and `teamai remove skills <name>` now honour `enabledAgents` and leave excluded tools untouched, matching the whitelist `teamai pull` already applies when it cleans up a tombstoned resource. Fixes [#590](https://github.com/Tencent/teamai-cli/issues/590).
 - `teamai import --cache-status` and `--cache-gc` now expose their existing JSON output through the CLI `--json` option.
 - Course-correction matching normalizes prompts and keywords to Unicode NFC, so composed and decomposed accents match. Stored prompt summaries and the 60-second correction window are unchanged. Fixes [#573](https://github.com/Tencent/teamai-cli/issues/573).
 - Course-correction detection matches keywords in space-separated scripts as whole words, so Spanish "segundo" no longer counts as `undo` (for [#564](https://github.com/Tencent/teamai-cli/issues/564)).
+- `teamai doctor` no longer assumes TGit before initialization and now exits with code 1 when any diagnostic check fails.
 - MCP `requires` is resolved from `PATH` (including Windows `PATHEXT`), so `teamai mcp inject` no longer skips servers such as `uvx` on Windows ([#540](https://github.com/Tencent/teamai-cli/pull/540), for [#539](https://github.com/Tencent/teamai-cli/issues/539)).
 - The GitHub and CNB providers resolve their CLI to a launchable absolute path and start it through cross-spawn, so on Windows they no longer answer "installed" while every call fails silently ([#520](https://github.com/Tencent/teamai-cli/pull/520)).
 - `enabledAgents` now also gates CLI builtin deploy, CLAUDE.md-class injects, and last-pull skip-sync targets, so an already-installed tool outside the whitelist is not written to ([#510](https://github.com/Tencent/teamai-cli/issues/510)).
 - `teamai status` counts rule files in subdirectories recursively ([#437](https://github.com/Tencent/teamai-cli/pull/437)).
 - Codex Stop-phase contribution hints are deferred to the next prompt, so the host no longer rejects `additionalContext` ([#441](https://github.com/Tencent/teamai-cli/pull/441)).
+- Agent version detection launches the agent CLI through cross-spawn, so on Windows an npm-installed agent CLI such as `codebuddy`, `claude` or `openclaw` (a `.cmd` shim) reports its version instead of an empty `agent_version`.
 
 ### 📝 Documentation
 

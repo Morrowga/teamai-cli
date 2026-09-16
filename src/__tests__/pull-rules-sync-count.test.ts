@@ -197,3 +197,78 @@ describe('pull — --force bypasses isToolInstalled for rules (#574/#585)', () =
     expect(successCalls.some((m) => /Synced 1 rule\(s\)/.test(m))).toBe(true);
   });
 });
+
+describe('pull — same phantom-success gate applied to skills and agents (#574/#585 follow-up)', () => {
+  let tmpDir: string;
+  let homeDir: string;
+  let repoPath: string;
+
+  function config(): LocalConfig {
+    return {
+      repo: { localPath: repoPath, remote: 'https://example.com/test/repo.git' },
+      username: 'testuser',
+      updatePolicy: 'auto',
+      additionalRoles: [],
+      scope: 'user',
+    };
+  }
+
+  beforeEach(async () => {
+    tmpDir = await fse.mkdtemp(path.join(os.tmpdir(), 'teamai-pull-skills-agents-count-'));
+    homeDir = path.join(tmpDir, 'home');
+    repoPath = path.join(tmpDir, 'team-repo');
+
+    await fse.ensureDir(path.join(repoPath, 'skills', 'my-skill'));
+    await fse.writeFile(path.join(repoPath, 'skills', 'my-skill', 'SKILL.md'), '# My Skill\n');
+
+    vi.stubEnv('HOME', homeDir);
+
+    const teamConfig: TeamaiConfig = {
+      team: 'test',
+      description: '',
+      repo: 'https://example.com/test/repo.git',
+      provider: 'github',
+      reviewers: [],
+      sharing: {
+        skills: {},
+        rules: { enforced: [] },
+        docs: { localDir: '' },
+        env: { injectShellProfile: true },
+      },
+      toolPaths: {
+        claude: { skills: '.claude/skills', rules: '.claude/rules' },
+      },
+    };
+
+    vi.mocked(loadLocalConfigForScope).mockResolvedValue(config());
+    vi.mocked(loadTeamConfig).mockResolvedValue(teamConfig);
+    vi.mocked(detectProjectConfig).mockResolvedValue(null);
+    vi.mocked(log.success).mockClear();
+    vi.mocked(log.warn).mockClear();
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fse.remove(tmpDir);
+  });
+
+  it('skills: does NOT claim success when no tool is installed', async () => {
+    await pull({});
+
+    expect(await fse.pathExists(path.join(homeDir, '.claude'))).toBe(false);
+
+    const successCalls = vi.mocked(log.success).mock.calls.map(([msg]) => String(msg));
+    expect(successCalls.some((m) => /Synced \d+ skills/.test(m))).toBe(false);
+
+    const warnCalls = vi.mocked(log.warn).mock.calls.map(([msg]) => String(msg));
+    expect(warnCalls.some((m) => /skills available but no installed tool directory found/.test(m))).toBe(true);
+  });
+
+  it('skills: DOES sync and writes the file when the tool is installed', async () => {
+    await fse.ensureDir(path.join(homeDir, '.claude'));
+
+    await pull({});
+
+    expect(await fse.pathExists(path.join(homeDir, '.claude/skills/my-skill/SKILL.md'))).toBe(true);
+  });
+});

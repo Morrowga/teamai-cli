@@ -480,7 +480,7 @@ The existing SessionStart hook runs `teamai pull`. When the `packages` declarati
 ```bash
 teamai packages             # Install every team declaration
 teamai packages --dry-run   # Preview native commands without installing or writing files
-teamai doctor              # Check runtimes and declared package/marketplace/plugin status
+teamai doctor              # Check runtimes and declared package/marketplace/plugin status; exits 1 when any check fails
 ```
 
 After a successful install, TeamAI writes a local snapshot to `teamai.lock` under the active scope's `.teamai` directory. The lock records installed versions and the declaration hash used by the SessionStart hint; it is not stored in the team repository. In user scope, machine-wide npm tools and Claude plugins are acknowledged once, while project npm dependencies are acknowledged separately for each working directory so installing in one repository cannot silence another repository's hint.
@@ -1390,7 +1390,7 @@ roles:
       agents:    [common, frontend]   # optional; omitted = root-level agents only
 ```
 
-`teamai pull` copies these into each Tier-1 tool's `agents/` directory (e.g. `~/.claude/agents/`), flattened by file name, so two active namespaces must not define the same agent name (pull reports the collision and skips the scope). When a member changes role, agents of the namespaces that stopped being active are removed on the next pull, unless the deployed copy was edited locally, in which case it is kept with a warning. Without a configured role, every agent syncs. `teamai push` resolves the source using the same active role and project namespaces as pull. It writes edits to that source and skips ambiguous destinations with a warning; an agent with only inactive sources is also skipped. Skipped agents do not block other resources in the same push. A new agent lands at the root. Cleanup checks each tool separately, respecting YAML `targets` and legacy format support. An active same-named agent protects a deployed file only when it targets that tool and output file. The CLI's built-in `teamai-recall.md` is deployed alongside team agents but is not uploaded by `teamai push`.
+`teamai pull` copies these into each Tier-1 tool's `agents/` directory (e.g. `~/.claude/agents/`), flattened by file name, so two active namespaces must not define the same agent name (pull reports the collision and skips the scope). `teamai pull` writes `<name>.toml` for Codex tools, `<name>.json` for Kiro, and `<name>.md` for every other tool. When a member changes role, agents of the namespaces that stopped being active are removed on the next pull, unless the deployed copy was edited locally, in which case it is kept with a warning. Without a configured role, every agent syncs. `teamai push` resolves the source using the same active role and project namespaces as pull. It writes edits to that source and skips ambiguous destinations with a warning; an agent with only inactive sources is also skipped. Skipped agents do not block other resources in the same push. A new agent lands at the root. Cleanup checks each tool separately, respecting YAML `targets` and legacy format support. An active same-named agent protects a deployed file only when it targets that tool and output file. `teamai remove agents <name>` records a tombstone. The next pull on every other machine deletes `<name>.md`, `<name>.toml` and `<name>.json` from each synced tool's agents directory. That cleanup also runs when the pull finds the team repo unchanged. The CLI's built-in `teamai-recall.md` is deployed alongside team agents but is not uploaded by `teamai push`.
 
 ### OpenCode
 
@@ -1459,6 +1459,8 @@ teamai remove rules <name>
 teamai remove agents <name>
 teamai remove mcp <name>
 ```
+
+`teamai doctor` exits with code 0 only when every check passes, and code 1 when any check fails. Before initialization, it reports the missing configuration without assuming a Git provider.
 
 Auto-update runs in the Stop hook and is controlled by two tiers:
 
@@ -1664,7 +1666,7 @@ Shared resources (the env block, docs directory, and `~/.teamai/`) are removed *
 
 The exclusion is durable: `uninstall --agent <tool>` drops the tool from `enabledAgents` and records it in `disabledAgents`, so a later `pull` (or another tool's session-start hook) will not resurrect its skills, rules, agents, CLAUDE.md block, or hooks. Running `init --agent <tool>` again clears the exclusion and re-enables sync for that tool.
 
-The same `enabledAgents` whitelist (from `init --agent`) also gates CLI built-in skills/rules/agents and CLAUDE.md-class injects: an already-installed tool outside the list is not written to, even if its root directory already exists. Editing `enabledAgents` without `init` still invalidates the last-pull skip cache for newly added tools.
+The same `enabledAgents` whitelist (from `init --agent`) also gates CLI built-in skills/rules/agents and CLAUDE.md-class injects: an already-installed tool outside the list is neither written to nor deleted from, even if its root directory already exists. `teamai remove` respects the same whitelist for agents, rules, and skills. Editing `enabledAgents` without `init` still invalidates the last-pull skip cache for newly added tools.
 
 To rejoin after uninstalling:
 

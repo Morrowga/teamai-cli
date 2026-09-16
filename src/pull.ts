@@ -9,6 +9,7 @@ import { injectClaudeMdSection } from './utils/claudemd.js';
 import { getHandler, RulesHandler, DocsHandler, EnvHandler, AgentsHandler } from './resources/index.js';
 import { ResourceHandler } from './resources/base.js';
 import { ruleFileExtensionForTool } from './resources/rule-format.js';
+import { AGENT_FILE_EXTENSIONS } from './resources/agent-format.js';
 import { loadTagsConfig, filterByTags } from './utils/tags.js';
 import { BUILTIN_SKILL_NAMES } from './builtin-skills.js';
 import type { GlobalOptions, ResourceType, ResourceItem, TeamaiConfig, LocalConfig, TagsConfig } from './types.js';
@@ -471,47 +472,114 @@ function logSyncDetail(
  * this set alongside the revision prevents a pull for one tool from suppressing
  * the first resource sync for another.
  */
+/**
+ * Tool ids whose <field> directory currently exists for this scope, excluding
+ * agents disabled via enabledAgents/disabledAgents. The same walk (installed
+ * dir → not excluded) previously repeated once per resource type; shared here
+ * so rules/skills/agents' "did anything actually get written" checks and the
+ * revision-cache target list all agree on one answer (issue #574/#585).
+ */
+async function installedToolsFor(
+  teamConfig: TeamaiConfig,
+  localConfig: LocalConfig,
+  field: 'rules' | 'skills' | 'agents',
+): Promise<string[]> {
+  const baseDir = resolveBaseDir(localConfig);
+  const found: string[] = [];
+  for (const [tool, toolPath] of Object.entries(scopedToolPaths(teamConfig, localConfig))) {
+    if (isAgentExcluded(localConfig, tool)) continue;
+    const dir = toolPath[field];
+    if (!dir) continue;
+    if (await ResourceHandler.isToolInstalled(dir, baseDir)) found.push(tool);
+  }
+  return found;
+}
+
+/** Whether at least one configured tool's <field> directory currently exists. */
+async function hasInstalledTargetFor(
+  teamConfig: TeamaiConfig,
+  localConfig: LocalConfig,
+  field: 'rules' | 'skills' | 'agents',
+): Promise<boolean> {
+  return (await installedToolsFor(teamConfig, localConfig, field)).length > 0;
+}
+
 async function getInstalledResourceTargets(
   teamConfig: TeamaiConfig,
   localConfig: LocalConfig,
 ): Promise<string[]> {
-  const baseDir = resolveBaseDir(localConfig);
-  const targets: string[] = [];
-
-  for (const [tool, toolPath] of Object.entries(scopedToolPaths(teamConfig, localConfig))) {
-    if (isAgentExcluded(localConfig, tool)) continue;
-
-    const resourcePaths = [toolPath.skills, toolPath.rules, toolPath.agents]
-      .filter((resourcePath): resourcePath is string => !!resourcePath);
-    for (const resourcePath of resourcePaths) {
-      if (await ResourceHandler.isToolInstalled(resourcePath, baseDir)) {
-        targets.push(tool);
-        break;
-      }
+  const targets = new Set<string>();
+  for (const field of ['skills', 'rules', 'agents'] as const) {
+    for (const tool of await installedToolsFor(teamConfig, localConfig, field)) {
+      targets.add(tool);
     }
   }
-
-  return targets.sort();
+  return [...targets].sort();
 }
 
 /**
- * Whether at least one configured tool's rules/ directory currently exists.
- * isToolInstalled doesn't vary per rule — it's the same answer for every rule
- * in the batch — so this only needs to run once per pull, rather than trusting
- * pullAllRules' silent per-tool skip to imply anything about what actually got
- * written to disk (issue #574/#585).
+ * Every extension a tombstoned resource may wear in a tool's directory.
+ *
+ * Rules carry a per-tool extension (`.mdc` for compatible tools), and those
+ * dirs may still hold a `.md` copy from the layout that predates it. Agents are
+ * rendered per tool as `.md`, `.toml` or `.json`. Skills are directories, so
+ * their empty suffix leaves the bare name.
  */
-async function hasInstalledRulesTarget(
-  teamConfig: TeamaiConfig,
+function tombstoneExtensions(type: ResourceType, tool: string): readonly string[] {
+  if (type === 'rules') return [...new Set([ruleFileExtensionForTool(tool), '.md'])];
+  if (type === 'agents') return AGENT_FILE_EXTENSIONS;
+  return [''];
+}
+
+/**
+ * Delete the local copies of every resource the team has tombstoned.
+ *
+ * Called from the full sync and from the "already synced" fast path: a CLI
+ * upgrade that widens the extensions above must still reach a machine whose
+ * team repo HEAD has not moved since it pulled the tombstone (issue #576).
+ */
+async function cleanupTombstonedResources(
+  freshConfig: TeamaiConfig,
   localConfig: LocalConfig,
-): Promise<boolean> {
+  scopeLabel: string,
+): Promise<void> {
+  // Each entry maps a resource type to the field on toolPath that names the
+  // tool-side directory; `tombstoneExtensions` supplies the filename suffixes.
+  const tombstoneTypes: { type: ResourceType; toolPathField: 'rules' | 'skills' | 'agents' }[] = [
+    { type: 'rules', toolPathField: 'rules' },
+    { type: 'skills', toolPathField: 'skills' },
+    { type: 'agents', toolPathField: 'agents' },
+  ];
+
   const baseDir = resolveBaseDir(localConfig);
-  for (const [tool, toolPath] of Object.entries(scopedToolPaths(teamConfig, localConfig))) {
-    if (isAgentExcluded(localConfig, tool)) continue;
-    if (!toolPath.rules) continue;
-    if (await ResourceHandler.isToolInstalled(toolPath.rules, baseDir)) return true;
+  for (const { type, toolPathField } of tombstoneTypes) {
+    const handler = getHandler(type);
+    const tombstones = await handler.readTombstones(localConfig);
+    if (tombstones.size === 0) continue;
+
+    for (const [tool, toolPath] of Object.entries(scopedToolPaths(freshConfig, localConfig))) {
+      const dir = toolPath[toolPathField];
+      if (!dir) continue;
+      if (!await ResourceHandler.isToolInstalled(dir, baseDir)) continue;
+      if (isAgentExcluded(localConfig, tool)) continue;
+
+      for (const name of tombstones) {
+        for (const extension of tombstoneExtensions(type, tool)) {
+          const localPath = path.join(baseDir, dir, `${name}${extension}`);
+          if (!await pathExists(localPath)) continue;
+          // Even an upstream (tombstone) removal must not blow away a local
+          // repo's stash/unpushed history inside a skill directory. Keep
+          // + warn; the user can delete it manually once backed up.
+          if (type === 'skills' && await hasVcsMetadataRecursive(localPath)) {
+            log.warn(`[${scopeLabel}] Kept tombstoned skill "${name}" (${tool}): it has local VCS metadata (.git) that may hold unpushed history. Back it up, then delete it manually.`);
+            continue;
+          }
+          await remove(localPath);
+          log.debug(`[${scopeLabel}] Cleaned up tombstoned ${type} ${name} from ${dir}`);
+        }
+      }
+    }
   }
-  return false;
 }
 
 /**
@@ -588,6 +656,10 @@ export async function pullForScope(
           // Also refresh the CLAUDE.md recall block so a CLI upgrade that ships
           // a new block reaches CLAUDE.md even when the repo HEAD is unchanged.
           await injectRecallBlockIntoTools(freshConfig, localConfig, scopeLabel);
+          // Same reason: a machine that already pulled a tombstone with an older
+          // CLI keeps the copies that CLI failed to delete, and its stored rev
+          // never moves again. Re-run the cleanup so the upgrade reaches it (#576).
+          await cleanupTombstonedResources(freshConfig, localConfig, scopeLabel);
           return;
         }
 
@@ -643,7 +715,7 @@ export async function pullForScope(
         // would leak those artifacts on the machine after upstream deletion.
         await rulesHandler.pullAllRules(freshConfig, localConfig, items, options.force);
         if (items.length > 0) {
-          const hasTarget = await hasInstalledRulesTarget(freshConfig, localConfig);
+          const hasTarget = await hasInstalledTargetFor(freshConfig, localConfig, 'rules');
           if (hasTarget) {
             log.success(`[${scopeLabel}] Synced ${items.length} rule(s)${skipped.length > 0 ? ` (skipped ${skipped.length} by tags)` : ''}`);
             totalSynced += items.length;
@@ -755,72 +827,27 @@ export async function pullForScope(
         }
       }
     } else {
-      for (const item of items) {
-        await handler.pullItem(item, freshConfig, localConfig);
-      }
-
-      if (type === 'skills') {
-        logSyncDetail(type, items, existingNames, !!options.verbose, scopeLabel, skippedByTags);
+      const hasTarget = await hasInstalledTargetFor(freshConfig, localConfig, type as 'skills' | 'agents');
+      if (!hasTarget) {
+        log.warn(`[${scopeLabel}] ${items.length} ${type} available but no installed tool directory found — nothing written. Create the tool's directory and pull again, or use teamai init --agent.`);
       } else {
-        log.success(`[${scopeLabel}] Synced ${items.length} ${type}`);
+        for (const item of items) {
+          await handler.pullItem(item, freshConfig, localConfig);
+        }
+
+        if (type === 'skills') {
+          logSyncDetail(type, items, existingNames, !!options.verbose, scopeLabel, skippedByTags);
+        } else {
+          log.success(`[${scopeLabel}] Synced ${items.length} ${type}`);
+        }
+        totalSynced += items.length;
       }
     }
-
-    totalSynced += items.length;
   }
 
   // Step 3: Clean up tombstoned resources
   if (!options.dryRun) {
-    // Each entry maps a resource type to (a) the field on toolPath that names
-    // the tool-side directory and (b) the filename suffix used for that
-    // resource on disk (e.g. rules/wiki pages are files, skills are dirs).
-    const tombstoneTypes: {
-      type: ResourceType;
-      ext?: string;
-      toolPathField: 'rules' | 'skills' | 'agents';
-    }[] = [
-      { type: 'rules', ext: '.md', toolPathField: 'rules' },
-      { type: 'skills', toolPathField: 'skills' },
-      { type: 'agents', ext: '.md', toolPathField: 'agents' },
-    ];
-
-    const baseDir = resolveBaseDir(localConfig);
-    for (const { type, ext, toolPathField } of tombstoneTypes) {
-      const handler = getHandler(type);
-      const tombstones = await handler.readTombstones(localConfig);
-      if (tombstones.size === 0) continue;
-
-      for (const [tool, toolPath] of Object.entries(scopedToolPaths(freshConfig, localConfig))) {
-        const dir = toolPath[toolPathField];
-        if (!dir) continue;
-        if (!await ResourceHandler.isToolInstalled(dir, baseDir)) continue;
-        if (isAgentExcluded(localConfig, tool)) continue;
-
-        // Rules carry a per-tool extension (`.mdc` for compatible tools), and those dirs
-        // may still hold a `.md` copy from the layout that predates it, so a
-        // tombstoned rule is cleaned up under every extension it may wear.
-        const extensions = type === 'rules'
-          ? [...new Set([ruleFileExtensionForTool(tool), '.md'])]
-          : [ext];
-
-        for (const name of tombstones) {
-          for (const extension of extensions) {
-            const localPath = path.join(baseDir, dir, extension ? `${name}${extension}` : name);
-            if (await pathExists(localPath)) {
-              // Even an upstream (tombstone) removal must not blow away a local
-              // git repo's stash/unpushed history inside a skill directory. Keep
-              // + warn; the user can delete it manually once backed up.
-              if (type === 'skills' && await hasVcsMetadataRecursive(localPath)) {
-                log.warn(`[${scopeLabel}] Kept tombstoned skill "${name}" (${tool}): it has local VCS metadata (.git) that may hold unpushed history. Back it up, then delete it manually.`);
-                continue;
-              }
-              await remove(localPath);
-              log.debug(`[${scopeLabel}] Cleaned up tombstoned ${type} ${name} from ${dir}`);
-            }
-          }
-        }
-      }
-    }
+    await cleanupTombstonedResources(freshConfig, localConfig, scopeLabel);
 
     if (roleContext) {
       await cleanupInactiveNamespaceSkills(
