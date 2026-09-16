@@ -495,10 +495,30 @@ async function getInstalledResourceTargets(
 }
 
 /**
+ * Whether at least one configured tool's rules/ directory currently exists.
+ * isToolInstalled doesn't vary per rule — it's the same answer for every rule
+ * in the batch — so this only needs to run once per pull, rather than trusting
+ * pullAllRules' silent per-tool skip to imply anything about what actually got
+ * written to disk (issue #574/#585).
+ */
+async function hasInstalledRulesTarget(
+  teamConfig: TeamaiConfig,
+  localConfig: LocalConfig,
+): Promise<boolean> {
+  const baseDir = resolveBaseDir(localConfig);
+  for (const [tool, toolPath] of Object.entries(scopedToolPaths(teamConfig, localConfig))) {
+    if (isAgentExcluded(localConfig, tool)) continue;
+    if (!toolPath.rules) continue;
+    if (await ResourceHandler.isToolInstalled(toolPath.rules, baseDir)) return true;
+  }
+  return false;
+}
+
+/**
  * Pull resources for a single scope. This is the core sync logic extracted
  * from the original pull() function to support both user and project scope.
  */
-async function pullForScope(
+export async function pullForScope(
   localConfig: LocalConfig,
   options: GlobalOptions,
   policy: {
@@ -621,12 +641,17 @@ async function pullForScope(
         // stale local rule files and deactivates the OpenCode instructions glob
         // when the team's last rule is removed. Guarding on items.length > 0
         // would leak those artifacts on the machine after upstream deletion.
-        await rulesHandler.pullAllRules(freshConfig, localConfig, items);
+        await rulesHandler.pullAllRules(freshConfig, localConfig, items, options.force);
         if (items.length > 0) {
-          log.success(`[${scopeLabel}] Synced ${items.length} rule(s)${skipped.length > 0 ? ` (skipped ${skipped.length} by tags)` : ''}`);
+          const hasTarget = await hasInstalledRulesTarget(freshConfig, localConfig);
+          if (hasTarget) {
+            log.success(`[${scopeLabel}] Synced ${items.length} rule(s)${skipped.length > 0 ? ` (skipped ${skipped.length} by tags)` : ''}`);
+            totalSynced += items.length;
+          } else {
+            log.warn(`[${scopeLabel}] ${items.length} rule(s) available but no installed tool directory found — nothing written. Create the tool's directory (e.g. mkdir .claude) and pull again, or use teamai init --agent.`);
+          }
         }
       }
-      totalSynced += items.length;
       continue;
     }
 
