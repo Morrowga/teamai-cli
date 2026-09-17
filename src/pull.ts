@@ -827,8 +827,8 @@ export async function pullForScope(
         }
       }
     } else {
-      const hasTarget = await hasInstalledTargetFor(freshConfig, localConfig, type as 'skills' | 'agents');
-      if (!hasTarget) {
+      const installed = await installedToolsFor(freshConfig, localConfig, type as 'skills' | 'agents');
+      if (installed.length === 0) {
         log.warn(`[${scopeLabel}] ${items.length} ${type} available but no installed tool directory found — nothing written. Create the tool's directory and pull again, or use teamai init --agent.`);
       } else {
         for (const item of items) {
@@ -838,7 +838,7 @@ export async function pullForScope(
         if (type === 'skills') {
           logSyncDetail(type, items, existingNames, !!options.verbose, scopeLabel, skippedByTags);
         } else {
-          log.success(`[${scopeLabel}] Synced ${items.length} ${type}`);
+          log.success(`[${scopeLabel}] Synced ${items.length} ${type} → ${installed.join(', ')}`);
         }
         totalSynced += items.length;
       }

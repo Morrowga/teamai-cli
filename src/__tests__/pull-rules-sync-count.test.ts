@@ -272,3 +272,79 @@ describe('pull — same phantom-success gate applied to skills and agents (#574/
     expect(await fse.pathExists(path.join(homeDir, '.claude/skills/my-skill/SKILL.md'))).toBe(true);
   });
 });
+
+describe('pull — success message names which tools actually received the write (review follow-up)', () => {
+  let tmpDir: string;
+  let homeDir: string;
+  let repoPath: string;
+
+  function config(): LocalConfig {
+    return {
+      repo: { localPath: repoPath, remote: 'https://example.com/test/repo.git' },
+      username: 'testuser',
+      updatePolicy: 'auto',
+      additionalRoles: [],
+      scope: 'user',
+    };
+  }
+
+  beforeEach(async () => {
+    tmpDir = await fse.mkdtemp(path.join(os.tmpdir(), 'teamai-pull-partial-install-'));
+    homeDir = path.join(tmpDir, 'home');
+    repoPath = path.join(tmpDir, 'team-repo');
+
+    // agents (not skills) hits the plain log.success line the reviewer's diff
+    // touched — skills always goes through logSyncDetail instead.
+    await fse.ensureDir(path.join(repoPath, 'agents'));
+    await fse.writeFile(path.join(repoPath, 'agents', 'my-agent.yaml'), 'name: my-agent\ndescription: test\ninstructions: test\n');
+
+    // claude installed, codex is not — the exact partial-install scenario.
+    await fse.ensureDir(path.join(homeDir, '.claude'));
+
+    vi.stubEnv('HOME', homeDir);
+
+    const teamConfig: TeamaiConfig = {
+      team: 'test',
+      description: '',
+      repo: 'https://example.com/test/repo.git',
+      provider: 'github',
+      reviewers: [],
+      sharing: {
+        skills: {},
+        rules: { enforced: [] },
+        docs: { localDir: '' },
+        env: { injectShellProfile: true },
+      },
+      toolPaths: {
+        claude: { skills: '.claude/skills', rules: '.claude/rules', agents: '.claude/agents' },
+        codex: { skills: '.codex/skills', rules: '.codex/rules', agents: '.codex/agents' },
+      },
+    };
+
+    vi.mocked(loadLocalConfigForScope).mockResolvedValue(config());
+    vi.mocked(loadTeamConfig).mockResolvedValue(teamConfig);
+    vi.mocked(detectProjectConfig).mockResolvedValue(null);
+    vi.mocked(log.success).mockClear();
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fse.remove(tmpDir);
+  });
+
+  it('names only claude, not codex, when only claude is installed', async () => {
+    await pull({});
+
+    // claude actually got the file.
+    expect(await fse.pathExists(path.join(homeDir, '.claude/agents/my-agent.md'))).toBe(true);
+    // codex silently got nothing — this is the exact gap the reviewer flagged.
+    expect(await fse.pathExists(path.join(homeDir, '.codex'))).toBe(false);
+
+    const successCalls = vi.mocked(log.success).mock.calls.map(([msg]) => String(msg));
+    const agentsMsg = successCalls.find((m) => /Synced \d+ agents/.test(m));
+
+    expect(agentsMsg).toBeDefined();
+    expect(agentsMsg).toContain('claude');
+    expect(agentsMsg).not.toContain('codex');
+  });
+});
